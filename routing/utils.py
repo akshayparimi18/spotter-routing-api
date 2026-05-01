@@ -59,21 +59,19 @@ def get_route_data(start_coords, finish_coords):
 
 def calculate_optimal_stops(route_geometry, total_distance_miles):
     """
-    Greedy algorithm to find the optimal fuel stops.
+    Strict Pure Python implementation of the Dynamic Tank Greedy Algorithm.
+    Correctly models 500-mile max range, 50-gallon tank constraints, and the final trip leg.
     """
     max_range = 500.0
+    tank_capacity = 50.0
     mpg = 10.0
     
-    # In-memory fetch of all valid stations to optimize Haversine distance calculations
+    # 1. Fetch all geocoded stations into memory (SQLite approach)
     all_stations = list(FuelStation.objects.exclude(latitude__isnull=True).exclude(longitude__isnull=True).values(
         'opis_id', 'name', 'address', 'city', 'state', 'retail_price', 'latitude', 'longitude'
     ))
     
-    current_mile = 0.0
-    stops = []
-    total_cost = 0.0
-    
-    # Array of cumulative distances for the route geometry points
+    # 2. Pre-calculate route cumulative distances (mile markers)
     route_distances = [0.0]
     for i in range(1, len(route_geometry)):
         dist = haversine(
@@ -82,89 +80,129 @@ def calculate_optimal_stops(route_geometry, total_distance_miles):
         )
         route_distances.append(route_distances[-1] + dist)
 
-    while total_distance_miles - current_mile > max_range:
-        target_mile = current_mile + max_range
+    # 3. Assign a "mile marker" to each valid station near the route
+    stations_on_route = []
+    
+    # Sub-sample the route to optimize Python memory performance. 
+    # Checking every 10th coordinate is sufficiently accurate for a 5-mile buffer search.
+    sub_route = list(enumerate(route_geometry))[::10]
+    
+    for station in all_stations:
+        closest_idx = 0
+        closest_dist = float('inf')
         
-        # Determine the segment of the route we can reach
-        current_index = 0
-        for i, dist in enumerate(route_distances):
-            if dist >= current_mile:
-                current_index = i
+        for i, p in sub_route:
+            d = haversine(station['latitude'], station['longitude'], p[0], p[1])
+            if d < closest_dist:
+                closest_dist = d
+                closest_idx = i
+                
+        # If the station is within ~5 miles of the route, add it to our playable list
+        if closest_dist <= 5.0:
+            stations_on_route.append({
+                'station': station,
+                'mile': route_distances[closest_idx]
+            })
+            
+    # Sort strictly by mile marker ascending
+    stations_on_route.sort(key=lambda x: x['mile'])
+    
+    # Filter out stations that require backtracking (mile marker < 0)
+    stations_on_route = [s for s in stations_on_route if s['mile'] >= 0]
+
+    # 4. Dynamic Tank Greedy Optimization Algorithm
+    current_mile = 0.0
+    current_gallons = 0.0 # Vehicle starts empty
+    total_cost = 0.0
+    stops = []
+    
+    while current_mile < total_distance_miles:
+        # Determine stations reachable from our current position
+        reachable_stations = [s for s in stations_on_route if s['mile'] > current_mile and s['mile'] <= current_mile + max_range]
+        distance_to_destination = total_distance_miles - current_mile
+        
+        # If no stations are reachable, check if we can just drive to the destination
+        if not reachable_stations and distance_to_destination > max_range:
+            raise Exception("No reachable fuel stations found. Route cannot be completed.")
+            
+        current_price = float('inf')
+        if stops:
+            current_price = stops[-1]['price']
+            
+        # SCENARIO A: Find the first reachable station that is CHEAPER than our current station
+        cheaper_station = None
+        for s in reachable_stations:
+            if s['station']['retail_price'] < current_price:
+                cheaper_station = s
                 break
                 
-        target_index = 0
-        for i, dist in enumerate(route_distances):
-            if dist > target_mile:
-                break
-            target_index = i
+        if cheaper_station:
+            distance_to_next = cheaper_station['mile'] - current_mile
+            gallons_needed = distance_to_next / mpg
+            gallons_to_buy = max(0, gallons_needed - current_gallons)
             
-        current_point = route_geometry[current_index]
-        reachable_segment = route_geometry[current_index:target_index+1]
-        
-        # Bounding box for initial filtering (~5 mile buffer = ~0.07 degrees)
-        lats = [p[0] for p in reachable_segment]
-        lons = [p[1] for p in reachable_segment]
-        min_lat, max_lat = min(lats) - 0.07, max(lats) + 0.07
-        min_lon, max_lon = min(lons) - 0.07, max(lons) + 0.07
-        
-        valid_stations = []
-        for station in all_stations:
-            # 1. Bounding box check
-            if not (min_lat <= station['latitude'] <= max_lat and min_lon <= station['longitude'] <= max_lon):
-                continue
+            if gallons_to_buy > 0:
+                cost = gallons_to_buy * current_price
+                total_cost += cost
+                if stops:
+                    stops[-1]['money_spent'] += cost
                 
-            # 2. Must be reachable from our current position
-            dist_from_current = haversine(current_point[0], current_point[1], station['latitude'], station['longitude'])
-            if dist_from_current > max_range:
-                continue
-                
-            # 3. Must be near the reachable route segment (within 5 miles)
-            min_dist_to_route = min([haversine(station['latitude'], station['longitude'], p[0], p[1]) for p in reachable_segment])
+            current_mile = cheaper_station['mile']
+            current_gallons = 0.0 # Arrive completely empty
             
-            if min_dist_to_route <= 5.0:
-                # Find the closest point on the route to determine our new progress (effective mile)
-                closest_idx = 0
-                closest_dist = float('inf')
-                for i, p in enumerate(reachable_segment):
-                    d = haversine(station['latitude'], station['longitude'], p[0], p[1])
-                    if d < closest_dist:
-                        closest_dist = d
-                        closest_idx = i
-                
-                effective_mile = route_distances[current_index + closest_idx]
-                
-                # Must make some forward progress (e.g., at least 10 miles)
-                if effective_mile > current_mile + 10:
-                    valid_stations.append({
-                        'station': station,
-                        'dist_from_current': dist_from_current,
-                        'effective_mile': effective_mile
-                    })
-        
-        if not valid_stations:
-            raise Exception("No reachable fuel stations found along the route.")
+            stops.append({
+                "name": cheaper_station['station']['name'],
+                "location": f"{cheaper_station['station']['address']}, {cheaper_station['station']['city']}, {cheaper_station['station']['state']}",
+                "price": cheaper_station['station']['retail_price'],
+                "money_spent": 0.0
+            })
+            continue
+
+        # SCENARIO C: The destination is reachable, and there are NO cheaper stations before it
+        if distance_to_destination <= max_range:
+            gallons_needed = distance_to_destination / mpg
+            gallons_to_buy = max(0, gallons_needed - current_gallons)
             
-        # Select the cheapest valid station
-        best_station_data = min(valid_stations, key=lambda x: x['station']['retail_price'])
-        best_station = best_station_data['station']
-        distance_driven = best_station_data['dist_from_current']
+            if gallons_to_buy > 0:
+                cost = gallons_to_buy * current_price
+                total_cost += cost
+                if stops:
+                    stops[-1]['money_spent'] += cost
+                    
+            break
+            
+        # SCENARIO B: We are at the absolute cheapest station within the 500-mile lookahead, 
+        # AND we cannot reach the destination. Fill the tank completely.
+        next_cheapest = min(reachable_stations, key=lambda x: x['station']['retail_price'])
         
-        gallons_needed = distance_driven / mpg
-        cost = gallons_needed * best_station['retail_price']
-        
+        gallons_to_buy = tank_capacity - current_gallons
+        cost = gallons_to_buy * current_price
         total_cost += cost
-        stops.append({
-            "name": best_station['name'],
-            "location": f"{best_station['address']}, {best_station['city']}, {best_station['state']}",
-            "price": best_station['retail_price'],
-            "money_spent": round(cost, 2)
-        })
         
-        current_mile = best_station_data['effective_mile']
+        if not stops:
+             stops.append({
+                "name": "Starting Location Fill-Up",
+                "location": "Origin",
+                "price": next_cheapest['station']['retail_price'], # Adopt the first station's price for the origin
+                "money_spent": cost
+            })
+        else:
+            stops[-1]['money_spent'] += cost
+        
+        distance_to_next = next_cheapest['mile'] - current_mile
+        current_mile = next_cheapest['mile']
+        current_gallons = tank_capacity - (distance_to_next / mpg)
+        
+        stops.append({
+            "name": next_cheapest['station']['name'],
+            "location": f"{next_cheapest['station']['address']}, {next_cheapest['station']['city']}, {next_cheapest['station']['state']}",
+            "price": next_cheapest['station']['retail_price'],
+            "money_spent": 0.0
+        })
 
     return {
         "route_map": route_geometry,
         "total_distance_miles": round(total_distance_miles, 2),
         "total_cost": round(total_cost, 2),
-        "fuel_stops": stops
+        "fuel_stops": [s for s in stops if s['money_spent'] > 0]
     }
