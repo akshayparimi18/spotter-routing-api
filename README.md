@@ -42,19 +42,32 @@ python manage.py runserver
 
 ## API Usage
 
-### Endpoint
-`POST /api/routing/optimize/`
-
-### Request Format
-Send a JSON payload with the `start_location` and `finish_location` strings.
-
-**Example Request:**
-```json
-{
-    "start_location": "New York, NY",
-    "finish_location": "Los Angeles, CA"
-}
+### 1. Start the Server
+First, ensure your Django development server is running in your terminal:
+```bash
+python manage.py runserver
 ```
+The server should output that it is running at `http://127.0.0.1:8000/`.
+
+### 2. Test in Postman
+1. Open **Postman**.
+2. Create a new request by clicking the **"+"** button or **"New"**.
+3. Change the HTTP method dropdown from `GET` to **`POST`**.
+4. Enter the endpoint URL into the address bar:
+   ```text
+   http://127.0.0.1:8000/api/routing/optimize/
+   ```
+5. Click on the **Body** tab below the URL bar.
+6. Select the **raw** radio button.
+7. Click the text dropdown (usually says "Text") on the right and change it to **JSON**.
+8. Paste the following test payload into the large text area:
+   ```json
+   {
+       "start_location": "New York, NY",
+       "finish_location": "Los Angeles, CA"
+   }
+   ```
+9. Click the blue **Send** button.
 
 ### Example Response
 The API will return a JSON object detailing the full coordinate path, total miles, total cost, and the exact chronological itinerary of the optimal fuel stops.
