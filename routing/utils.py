@@ -141,11 +141,23 @@ def calculate_optimal_stops(route_geometry, total_distance_miles):
             gallons_needed = distance_to_next / mpg
             gallons_to_buy = max(0, gallons_needed - current_gallons)
             
+            price_to_use = current_price
+            if price_to_use == float('inf'):
+                price_to_use = cheaper_station['station']['retail_price']
+            
             if gallons_to_buy > 0:
-                cost = gallons_to_buy * current_price
+                cost = gallons_to_buy * price_to_use
                 total_cost += cost
                 if stops:
                     stops[-1]['money_spent'] += cost
+                else:
+                    # We had to buy fuel at the starting location to reach this first station
+                    stops.append({
+                        "name": "Starting Location Fill-Up",
+                        "location": "Origin",
+                        "price": price_to_use,
+                        "money_spent": cost
+                    })
                 
             current_mile = cheaper_station['mile']
             current_gallons = 0.0 # Arrive completely empty
@@ -163,11 +175,23 @@ def calculate_optimal_stops(route_geometry, total_distance_miles):
             gallons_needed = distance_to_destination / mpg
             gallons_to_buy = max(0, gallons_needed - current_gallons)
             
+            price_to_use = current_price
+            if price_to_use == float('inf'):
+                # Just use an average price of $3.50 if there are no stations at all
+                price_to_use = reachable_stations[0]['station']['retail_price'] if reachable_stations else 3.50
+                
             if gallons_to_buy > 0:
-                cost = gallons_to_buy * current_price
+                cost = gallons_to_buy * price_to_use
                 total_cost += cost
                 if stops:
                     stops[-1]['money_spent'] += cost
+                else:
+                    stops.append({
+                        "name": "Starting Location Fill-Up",
+                        "location": "Origin",
+                        "price": price_to_use,
+                        "money_spent": cost
+                    })
                     
             break
             
